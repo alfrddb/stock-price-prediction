@@ -1,148 +1,122 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-
+import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import root_mean_squared_error
 
-# Streamlit page configuration
-st.set_page_config(page_title="Stock Price Predictor", layout="wide")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="LSTM Stock Price Predictor",
+    page_icon="📈",
+    layout="wide"
+)
 
-st.title("📈 Stock Price Prediction")
-st.markdown("This web app uses a Deep Learning model (LSTM) to analyze and predict closing stock prices based on historical data from Yahoo Finance.")
+st.title("📈 Stock Price Predictor")
+st.markdown("Forecast future stock prices using a Long Short-Term Memory (**LSTM**) deep learning model built with PyTorch.")
 
-# --- Sidebar for user controls ---
+# --- SIDEBAR: USER PARAMETERS ---
 st.sidebar.header("Model Parameters")
-ticker = st.sidebar.text_input("Enter Ticker (e.g., AMZN, AAPL, TSLA)", value="AMZN")
-start_date = st.sidebar.date_input("Start Date for History", value=pd.to_datetime("2020-01-01"))
-seq_length = st.sidebar.slider("Sequence Length (Days)", min_value=10, max_value=60, value=30)
-num_epochs = st.sidebar.slider("Training Epochs", min_value=50, max_value=300, value=100, step=25)
+ticker = st.sidebar.text_input("Stock Ticker", value="AAPL")
+start_date = st.sidebar.date_input("Start Date", value=pd.to_datetime("2020-01-01"))
+seq_length = st.sidebar.slider("Sequence Length (Days)", min_value=10, max_value=90, value=60)
+epochs = st.sidebar.slider("Training Epochs", min_value=5, max_value=50, value=20)
 
-# Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# --- Data Loading ---
+# --- DATA LOADING ---
 @st.cache_data
 def load_data(tk, start):
     df = yf.download(tk, start)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     return df
 
-data_load_state = st.text("Downloading data from Yahoo Finance...")
+data_load_state = st.text("Loading data from Yahoo Finance...")
 df = load_data(ticker, start_date)
-data_load_state.text("Data loaded successfully!")
+data_load_state.text("")
 
-if df.empty:
-    st.error("Error: No data found for the entered ticker or invalid date range.")
+if df.empty or 'Close' not in df.columns:
+    st.error("Error retrieving data. Please check the stock ticker (e.g., AAPL, TSLA, MSFT).")
 else:
-    # Show dataframe preview
-    with st.expander("View raw downloaded data"):
-        st.write(df.tail())
+    st.subheader(f"Historical Trend: {ticker.upper()}")
+    st.line_chart(df['Close'])
 
-    # Historical closing price chart
-    st.subheader(f"Historical Closing Prices ({ticker})")
-    fig, ax = plt.subplots(figsize=(12, 5))
-    df['Close'].plot(ax=ax, title=f"Closing Price - {ticker}")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price")
-    st.pyplot(fig)
-
-    # --- Preprocessing ---
+    # --- DATA PREPARATION FOR LSTM ---
+    close_prices = df['Close'].values.reshape(-1, 1)
+    
     scaler = StandardScaler()
-    close_data = df[['Close']].copy()
-    close_data['Close_Scaled'] = scaler.fit_transform(close_data[['Close']])
+    scaled_data = scaler.fit_transform(close_prices)
 
-    values = close_data['Close_Scaled'].values
+    def create_sequences(data, seq_len):
+        xs, ys = [], []
+        for i in range(len(data) - seq_len):
+            x = data[i:(i + seq_len)]
+            y = data[i + seq_len]
+            xs.append(x)
+            ys.append(y)
+        return np.array(xs), np.array(ys)
 
-    data = []
-    for i in range(len(values) - seq_length):
-        data.append(values[i:i+seq_length])
-    data = np.array(data)
+    X, y = create_sequences(scaled_data, seq_length)
 
-    if len(data) == 0:
-        st.warning("The dataset is too short for the chosen sequence length. Please reduce the 'Sequence Length'.")
-    else:
-        train_size = int(0.8 * len(data))
+    train_size = int(len(X) * 0.8)
+    X_train, X_test = X[:train_size], X[train_size:]
+    y_train, y_test = y[:train_size], y[train_size:]
 
-        X_train = torch.from_numpy(data[:train_size, :-1]).type(torch.Tensor).to(device)
-        y_train = torch.from_numpy(data[:train_size, -1]).type(torch.Tensor).to(device)
+    X_train_t = torch.tensor(X_train, dtype=torch.float32)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32)
+    X_test_t = torch.tensor(X_test, dtype=torch.float32)
 
-        X_test = torch.from_numpy(data[train_size:, :-1]).type(torch.Tensor).to(device)
-        y_test = torch.from_numpy(data[train_size:, -1]).type(torch.Tensor).to(device)
+    # --- LSTM MODEL ARCHITECTURE ---
+    class LSTMModel(nn.Module):
+        def __init__(self, input_dim=1, hidden_dim=50, num_layers=1, output_dim=1):
+            super(LSTMModel, self).__init__()
+            self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+            self.fc = nn.Linear(hidden_dim, output_dim)
 
-        # --- LSTM Model Definition ---
-        class PredictionModel(nn.Module):
-            def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
-                super(PredictionModel, self).__init__()
-                self.num_layers = num_layers
-                self.hidden_dim = hidden_dim
-                self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-                self.fc = nn.Linear(hidden_dim, output_dim)
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            out = self.fc(out[:, -1, :])
+            return out
 
-            def forward(self, x):
-                h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim, device=device)
-                c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim, device=device)
-                out, _ = self.lstm(x, (h0.detach(), c0.detach()))
-                out = self.fc(out[:, -1, :])
-                return out
+    model = LSTMModel()
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-        model = PredictionModel(input_dim=1, hidden_dim=32, num_layers=2, output_dim=1).to(device)
-        criterion = torch.nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-        # --- Model Training ---
-        if st.button("Start LSTM Model Training"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for epoch in range(num_epochs):
-                model.train()
-                y_train_pred = model(X_train)
-                loss = criterion(y_train_pred, y_train)
-
+    # --- MODEL TRAINING ---
+    if st.button("Start LSTM Model Training"):
+        with st.spinner("Training in progress... Please wait."):
+            model.train()
+            for epoch in range(epochs):
                 optimizer.zero_grad()
+                output = model(X_train_t)
+                loss = criterion(output, y_train_t)
                 loss.backward()
                 optimizer.step()
+        
+        st.success("Training completed successfully!")
 
-                # Update progress bar
-                progress = (epoch + 1) / num_epochs
-                progress_bar.progress(progress)
-                status_text.text(f"Epoch {epoch+1}/{num_epochs} - Loss: {loss.item():.6f}")
+        # --- EVALUATION AND PREDICTION ---
+        model.eval()
+        with torch.no_grad():
+            train_predict = model(X_train_t).numpy()
+            test_predict = model(X_test_t).numpy()
 
-            st.success("Training completed successfully!")
+        # Inverse transformation
+        train_predict = scaler.inverse_transform(train_predict)
+        test_predict = scaler.inverse_transform(test_predict)
 
-            # --- Evaluation & Predictions ---
-            model.eval()
-            y_train_pred = model(X_train)
-            y_test_pred = model(X_test)
+        # --- RESULTS PLOT ---
+        st.subheader("Actual vs Predicted Prices Comparison")
+        
+        test_dates = df.index[seq_length + len(train_predict) : seq_length + len(train_predict) + len(test_predict)]
 
-            # Inverse transform to return to real prices
-            y_train_pred_inv = scaler.inverse_transform(y_train_pred.detach().cpu().numpy())
-            y_train_inv = scaler.inverse_transform(y_train.detach().cpu().numpy())
-            y_test_pred_inv = scaler.inverse_transform(y_test_pred.detach().cpu().numpy())
-            y_test_inv = scaler.inverse_transform(y_test.detach().cpu().numpy())
-
-            train_rmse = root_mean_squared_error(y_train_inv[:, 0], y_train_pred_inv[:, 0])
-            test_rmse = root_mean_squared_error(y_test_inv[:, 0], y_test_pred_inv[:, 0])
-
-            col1, col2 = st.columns(2)
-            col1.metric("Train RMSE", f"{train_rmse:.2f}")
-            col2.metric("Test RMSE", f"{test_rmse:.2f}")
-
-            # Results Chart
-            st.subheader("Predictions vs Actual Data (Test Set)")
-            fig_res, ax_res = plt.subplots(figsize=(12, 6))
-            
-            test_dates = df.index[train_size + seq_length:]
-            
-            ax_res.plot(test_dates, y_test_inv[:, 0], label="Actual", color="blue")
-            ax_res.plot(test_dates, y_test_pred_inv[:, 0], label="Predicted (LSTM)", color="orange", linestyle="--")
-            ax_res.set_xlabel("Date")
-            ax_res.set_ylabel("Price")
-            ax_res.legend()
-            st.pyplot(fig_res)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(df.index, df['Close'], label="Historical Actual Price", color="black", alpha=0.5)
+        ax.plot(test_dates, test_predict, label="LSTM Prediction (Test)", color="orange", linewidth=2)
+        ax.set_title(f"{ticker.upper()} - Closing Price Forecast")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price (USD)")
+        ax.legend()
+        ax.grid(True)
+        st.pyplot(fig)
