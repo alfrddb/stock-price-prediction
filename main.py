@@ -12,9 +12,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import root_mean_squared_error
 
 # Streamlit page configuration
-st.set_page_config(page_title="LSTM Stock Price Predictor", layout="wide")
+st.set_page_config(page_title="Stock Price Predictor", layout="wide")
 
-st.title("📈 Stock Price Prediction with LSTM & PyTorch")
+st.title("📈 Stock Price Prediction")
 st.markdown("This web app uses a Deep Learning model (LSTM) to analyze and predict closing stock prices based on historical data from Yahoo Finance.")
 
 # --- Sidebar for user controls ---
